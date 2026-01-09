@@ -42,6 +42,10 @@ async function initializeVendorPOS() {
 
         // Configurar eventos
         setupEventListeners();
+        setupVendorTabs();
+
+        // Cargar conteo de pagos pendientes
+        loadVendorPendingCount();
 
         hideLoading();
         console.log('✅ POS Vendedor listo');
@@ -278,15 +282,18 @@ function decreaseQuantity(productId) {
 }
 
 /**
- * Cancela la venta actual
+ * Cancela la venta actual (limpia el carrito)
  */
 function cancelSale() {
-    if (cart.length === 0) return;
+    if (cart.length === 0) {
+        showToast('El carrito ya está vacío');
+        return;
+    }
 
-    if (confirm('¿Cancelar esta venta?')) {
+    if (confirm('¿Limpiar el carrito? Se eliminarán todos los productos.')) {
         cart = [];
         updateCartDisplay();
-        showToast('Venta cancelada');
+        showToast('🗑️ Carrito limpiado');
     }
 }
 
@@ -326,6 +333,24 @@ function closePaymentModal() {
 function selectPaymentMethod(method) {
     document.querySelectorAll('.payment-option').forEach(opt => opt.classList.remove('selected'));
     document.querySelector(`[data-method="${method}"]`).classList.add('selected');
+
+    // Mostrar/ocultar campo de fecha para crédito
+    const creditDateGroup = document.getElementById('creditDateGroup');
+    if (creditDateGroup) {
+        if (method === 'credito') {
+            creditDateGroup.style.display = 'block';
+            // Establecer fecha mínima como mañana
+            const tomorrow = new Date();
+            tomorrow.setDate(tomorrow.getDate() + 1);
+            document.getElementById('creditDueDate').min = tomorrow.toISOString().split('T')[0];
+            // Sugerir 1 semana después por defecto
+            const nextWeek = new Date();
+            nextWeek.setDate(nextWeek.getDate() + 7);
+            document.getElementById('creditDueDate').value = nextWeek.toISOString().split('T')[0];
+        } else {
+            creditDateGroup.style.display = 'none';
+        }
+    }
 }
 
 /**
@@ -346,11 +371,23 @@ async function processSale() {
     }
 
     const paymentMethod = selectedPayment.dataset.method;
+
+    // Validar fecha si es venta a crédito
+    let creditDueDate = null;
+    if (paymentMethod === 'credito') {
+        const dueDateInput = document.getElementById('creditDueDate');
+        if (!dueDateInput || !dueDateInput.value) {
+            showToast('Selecciona la fecha de próximo pago');
+            return;
+        }
+        creditDueDate = dueDateInput.value;
+    }
+
     const paymentLabels = {
         'efectivo': 'Efectivo',
         'transferencia': 'Transferencia',
         'deposito': 'Depósito',
-        'credito': 'A Crédito'
+        'credito': 'A Crédito (Pendiente)'
     };
 
     showLoading('Procesando venta...');
@@ -386,6 +423,10 @@ async function processSale() {
                 price: item.price,
                 subtotal: item.price * item.quantity
             })),
+            // Campos para ventas a crédito
+            status: paymentMethod === 'credito' ? 'pending' : 'completed',
+            creditDueDate: creditDueDate,
+            paidAt: paymentMethod === 'credito' ? null : new Date().toISOString(),
             createdAt: firebase.firestore.FieldValue.serverTimestamp()
         };
 
@@ -465,12 +506,36 @@ function showReceipt() {
         </div>
     `).join('');
 
+    // Agregar información de crédito si aplica
+    let creditInfoHTML = '';
+    if (currentSale.status === 'pending' && currentSale.creditDueDate) {
+        const dueDate = new Date(currentSale.creditDueDate + 'T00:00:00');
+        const formattedDueDate = dueDate.toLocaleDateString('es-MX', {
+            weekday: 'long',
+            year: 'numeric',
+            month: 'long',
+            day: 'numeric'
+        });
+        creditInfoHTML = `
+            <div style="background: #fff3cd; border: 2px solid #ffc107; border-radius: 8px; padding: 12px; margin: 15px 0; text-align: center;">
+                <p style="margin: 0; color: #856404; font-weight: bold;">
+                    <i class="fas fa-clock"></i> PAGO PENDIENTE
+                </p>
+                <p style="margin: 5px 0 0 0; color: #856404; font-size: 0.9rem;">
+                    Fecha de pago: <strong>${formattedDueDate}</strong>
+                </p>
+            </div>
+        `;
+    }
+
     receiptContent.innerHTML = `
         <div class="receipt-header">
             <h2><i class="fas fa-candy-cane"></i> ${settings.businessName || 'Cami Candy'}</h2>
             <p>${settings.businessAddress || ''}</p>
             <p>${settings.businessPhone || ''}</p>
         </div>
+        
+        ${creditInfoHTML}
         
         <div class="receipt-info">
             <p><strong>Recibo #${currentSale.id}</strong></p>
@@ -516,35 +581,145 @@ function closeReceiptModal() {
 }
 
 /**
- * Descarga el recibo como imagen
+ * Descarga el recibo como imagen PNG
  */
 async function downloadReceipt() {
     if (!currentSale) return;
 
-    showToast('Generando recibo...');
+    showToast('Generando imagen...');
 
-    // Crear un canvas temporal para el recibo
     const receiptEl = document.getElementById('receiptContent');
 
     try {
-        // Usar html2canvas si está disponible, sino generar texto
-        const receiptText = generateReceiptText();
+        // Usar html2canvas para crear imagen del recibo
+        if (typeof html2canvas !== 'undefined') {
+            const canvas = await html2canvas(receiptEl, {
+                backgroundColor: '#ffffff',
+                scale: 2, // Alta resolución
+                useCORS: true,
+                logging: false
+            });
 
-        // Crear blob de texto
-        const blob = new Blob([receiptText], { type: 'text/plain' });
-        const url = URL.createObjectURL(blob);
+            // Convertir a imagen y descargar
+            const link = document.createElement('a');
+            link.download = `recibo_cami_candy_${currentSale.id}.png`;
+            link.href = canvas.toDataURL('image/png');
+            link.click();
 
-        const link = document.createElement('a');
-        link.href = url;
-        link.download = `recibo_${currentSale.id}_${Date.now()}.txt`;
-        link.click();
+            showToast('✅ Imagen descargada');
+        } else {
+            // Fallback: descargar como texto
+            const receiptText = generateReceiptText();
+            const blob = new Blob([receiptText], { type: 'text/plain' });
+            const url = URL.createObjectURL(blob);
 
-        URL.revokeObjectURL(url);
-        showToast('Recibo descargado');
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = `recibo_${currentSale.id}.txt`;
+            link.click();
+
+            URL.revokeObjectURL(url);
+            showToast('Recibo descargado');
+        }
     } catch (error) {
         console.error('Error descargando recibo:', error);
         showToast('Error al descargar');
     }
+}
+
+/**
+ * Imprime/Guarda el recibo como PDF
+ */
+function printReceipt() {
+    if (!currentSale) return;
+
+    // Crear una ventana nueva con el recibo para imprimir
+    const receiptHTML = `
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Recibo #${currentSale.id} - Cami Candy</title>
+            <style>
+                * { margin: 0; padding: 0; box-sizing: border-box; }
+                body { 
+                    font-family: 'Courier New', monospace; 
+                    font-size: 12px;
+                    padding: 10px;
+                    max-width: 280px;
+                    margin: 0 auto;
+                }
+                .receipt-header { text-align: center; border-bottom: 1px dashed #000; padding-bottom: 10px; margin-bottom: 10px; }
+                .receipt-header h2 { font-size: 18px; margin-bottom: 5px; }
+                .receipt-info { margin-bottom: 10px; }
+                .receipt-info p { margin: 3px 0; }
+                .receipt-items { border-top: 1px dashed #000; border-bottom: 1px dashed #000; padding: 10px 0; margin: 10px 0; }
+                .receipt-item { display: flex; justify-content: space-between; margin: 5px 0; }
+                .receipt-totals { margin: 10px 0; }
+                .receipt-total-row { display: flex; justify-content: space-between; margin: 3px 0; }
+                .receipt-total-row.final { font-weight: bold; font-size: 16px; border-top: 1px solid #000; padding-top: 5px; margin-top: 10px; }
+                .receipt-footer { text-align: center; margin-top: 15px; font-size: 10px; }
+                @media print { body { margin: 0; } }
+            </style>
+        </head>
+        <body>
+            <div class="receipt-header">
+                <h2>🍬 ${settings.businessName || 'Cami Candy'}</h2>
+                <p>${settings.businessAddress || ''}</p>
+                <p>${settings.businessPhone || ''}</p>
+            </div>
+            
+            <div class="receipt-info">
+                <p><strong>Recibo #${currentSale.id}</strong></p>
+                <p>Fecha: ${currentSale.formattedDate}</p>
+                <p>Cliente: ${currentSale.customerName}</p>
+                <p>Pago: ${currentSale.paymentLabel}</p>
+            </div>
+            
+            <div class="receipt-items">
+                ${currentSale.details.map(item => `
+                    <div class="receipt-item">
+                        <span>${item.quantity}x ${item.name}</span>
+                        <span>${settings.currencySymbol}${item.subtotal.toFixed(2)}</span>
+                    </div>
+                `).join('')}
+            </div>
+            
+            <div class="receipt-totals">
+                <div class="receipt-total-row">
+                    <span>Subtotal:</span>
+                    <span>${settings.currencySymbol}${currentSale.subtotal.toFixed(2)}</span>
+                </div>
+                <div class="receipt-total-row">
+                    <span>Impuesto (${currentSale.taxRate}%):</span>
+                    <span>${settings.currencySymbol}${currentSale.taxAmount.toFixed(2)}</span>
+                </div>
+                <div class="receipt-total-row final">
+                    <span>TOTAL:</span>
+                    <span>${settings.currencySymbol}${currentSale.total.toFixed(2)}</span>
+                </div>
+            </div>
+            
+            <div class="receipt-footer">
+                <p>${settings.receiptFooter || '¡Gracias por su compra!'}</p>
+                <p style="margin-top: 10px;">Cami Candy - ${new Date().toLocaleDateString()}</p>
+            </div>
+        </body>
+        </html>
+    `;
+
+    // Abrir ventana de impresión
+    const printWindow = window.open('', '_blank', 'width=400,height=600');
+    printWindow.document.write(receiptHTML);
+    printWindow.document.close();
+
+    // Esperar a que cargue y luego imprimir
+    printWindow.onload = function () {
+        setTimeout(() => {
+            printWindow.print();
+        }, 250);
+    };
+
+    showToast('📄 Ventana de impresión abierta');
 }
 
 /**
@@ -553,26 +728,25 @@ async function downloadReceipt() {
 function generateReceiptText() {
     if (!currentSale) return '';
 
-    let text = `🍬 *${settings.businessName || 'Candy Cami'}*\n`;
-    text += `${'─'.repeat(30)}\n`;
+    let text = `🍬 *${settings.businessName || 'Cami Candy'}*\n`;
+    text += `${'─'.repeat(28)}\n`;
     text += `📋 *Recibo #${currentSale.id}*\n`;
     text += `📅 ${currentSale.formattedDate}\n`;
-    text += `👤 Cliente: ${currentSale.customerName}\n`;
-    text += `💳 Pago: ${currentSale.paymentLabel}\n`;
-    text += `${'─'.repeat(30)}\n`;
-    text += `*PRODUCTOS:*\n`;
+    text += `👤 ${currentSale.customerName}\n`;
+    text += `💳 ${currentSale.paymentLabel}\n`;
+    text += `${'─'.repeat(28)}\n`;
 
     currentSale.details.forEach(item => {
-        text += `  ${item.quantity}x ${item.name}\n`;
-        text += `     ${settings.currencySymbol}${item.subtotal.toFixed(2)}\n`;
+        text += `• ${item.quantity}x ${item.name}\n`;
+        text += `   ${settings.currencySymbol}${item.subtotal.toFixed(2)}\n`;
     });
 
-    text += `${'─'.repeat(30)}\n`;
+    text += `${'─'.repeat(28)}\n`;
     text += `Subtotal: ${settings.currencySymbol}${currentSale.subtotal.toFixed(2)}\n`;
-    text += `Impuesto (${currentSale.taxRate}%): ${settings.currencySymbol}${currentSale.taxAmount.toFixed(2)}\n`;
-    text += `*TOTAL: ${settings.currencySymbol}${currentSale.total.toFixed(2)}*\n`;
-    text += `${'─'.repeat(30)}\n`;
-    text += `${settings.receiptFooter || '¡Gracias por su compra!'}\n`;
+    text += `Impuesto: ${settings.currencySymbol}${currentSale.taxAmount.toFixed(2)}\n`;
+    text += `*💰 TOTAL: ${settings.currencySymbol}${currentSale.total.toFixed(2)}*\n`;
+    text += `${'─'.repeat(28)}\n`;
+    text += `${settings.receiptFooter || '¡Gracias por tu compra! 🍬'}`;
 
     return text;
 }
@@ -589,6 +763,8 @@ function shareWhatsApp() {
     // Abrir WhatsApp con el texto del recibo
     const whatsappURL = `https://wa.me/?text=${encodedText}`;
     window.open(whatsappURL, '_blank');
+
+    showToast('📱 Abriendo WhatsApp...');
 }
 
 /**
@@ -612,6 +788,7 @@ function setupEventListeners() {
 
     // Modal de recibo
     document.getElementById('closeReceiptModal').addEventListener('click', closeReceiptModal);
+    document.getElementById('printReceiptBtn').addEventListener('click', printReceipt);
     document.getElementById('downloadReceiptBtn').addEventListener('click', downloadReceipt);
     document.getElementById('whatsappReceiptBtn').addEventListener('click', shareWhatsApp);
     document.getElementById('newSaleBtn').addEventListener('click', closeReceiptModal);
@@ -656,9 +833,211 @@ function hideLoading() {
     }
 }
 
+/**
+ * Configura las pestañas del vendedor
+ */
+function setupVendorTabs() {
+    const tabs = document.querySelectorAll('.vendor-tab');
+
+    tabs.forEach(tab => {
+        tab.addEventListener('click', () => {
+            const view = tab.dataset.view;
+
+            // Actualizar estilos de pestañas
+            tabs.forEach(t => {
+                t.style.borderBottomColor = 'transparent';
+                t.style.color = '#666';
+                t.style.fontWeight = '500';
+            });
+            tab.style.borderBottomColor = '#ff6b8b';
+            tab.style.color = '#ff6b8b';
+            tab.style.fontWeight = '600';
+
+            // Mostrar/ocultar vistas
+            document.getElementById('posView').style.display = view === 'pos' ? 'grid' : 'none';
+            document.getElementById('pendingView').style.display = view === 'pending' ? 'block' : 'none';
+
+            // Cargar datos si es la vista de pendientes
+            if (view === 'pending') {
+                loadVendorPendingSales();
+            }
+        });
+    });
+}
+
+/**
+ * Carga el conteo de pagos pendientes para el badge
+ */
+async function loadVendorPendingCount() {
+    try {
+        const db = firebase.firestore();
+        const snapshot = await db.collection('sales')
+            .where('status', '==', 'pending')
+            .get();
+
+        const count = snapshot.size;
+        const badge = document.getElementById('pendingBadge');
+
+        if (badge) {
+            if (count > 0) {
+                badge.textContent = count;
+                badge.style.display = 'inline';
+            } else {
+                badge.style.display = 'none';
+            }
+        }
+    } catch (error) {
+        console.error('Error cargando conteo de pendientes:', error);
+    }
+}
+
+/**
+ * Carga las ventas pendientes en la vista del vendedor
+ */
+async function loadVendorPendingSales() {
+    const listContainer = document.getElementById('vendorPendingList');
+    const totalElement = document.getElementById('vendorTotalPending');
+
+    if (!listContainer) return;
+
+    listContainer.innerHTML = `
+        <div style="text-align: center; padding: 40px; color: #666;">
+            <i class="fas fa-spinner fa-spin" style="font-size: 2rem;"></i>
+            <p>Cargando...</p>
+        </div>
+    `;
+
+    try {
+        const db = firebase.firestore();
+        const snapshot = await db.collection('sales')
+            .where('status', '==', 'pending')
+            .get();
+
+        const pendingSales = [];
+        snapshot.forEach(doc => {
+            pendingSales.push({ docId: doc.id, ...doc.data() });
+        });
+
+        if (pendingSales.length === 0) {
+            listContainer.innerHTML = `
+                <div style="text-align: center; padding: 40px;">
+                    <i class="fas fa-check-circle" style="font-size: 3rem; color: #28a745;"></i>
+                    <p style="color: #28a745; margin-top: 15px; font-weight: 600;">¡Todo cobrado!</p>
+                    <p style="color: #666;">No hay pagos pendientes.</p>
+                </div>
+            `;
+            if (totalElement) totalElement.textContent = '$0.00';
+            return;
+        }
+
+        // Ordenar por fecha de pago
+        pendingSales.sort((a, b) => {
+            if (!a.creditDueDate) return 1;
+            if (!b.creditDueDate) return -1;
+            return new Date(a.creditDueDate) - new Date(b.creditDueDate);
+        });
+
+        let totalPending = 0;
+        let html = '';
+
+        pendingSales.forEach(sale => {
+            totalPending += sale.total;
+
+            const saleDate = new Date(sale.date);
+            const formattedDate = saleDate.toLocaleDateString('es-MX');
+
+            let isOverdue = false;
+            let dueDateText = 'Sin fecha';
+            if (sale.creditDueDate) {
+                const dueDate = new Date(sale.creditDueDate + 'T00:00:00');
+                const today = new Date();
+                today.setHours(0, 0, 0, 0);
+                isOverdue = dueDate < today;
+                dueDateText = dueDate.toLocaleDateString('es-MX');
+            }
+
+            const products = sale.details.map(d => `${d.quantity}x ${d.name}`).join(', ');
+
+            html += `
+                <div style="background: ${isOverdue ? '#fff5f5' : '#f8f9fa'}; border: 1px solid ${isOverdue ? '#dc3545' : '#ddd'}; border-radius: 12px; padding: 15px; margin-bottom: 15px;">
+                    <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 10px;">
+                        <div>
+                            <strong style="font-size: 1.1rem; color: #333;">${sale.customerName || 'Cliente'}</strong>
+                            <br>
+                            <small style="color: #666;">Venta #${sale.id} • ${formattedDate}</small>
+                        </div>
+                        <div style="text-align: right;">
+                            <strong style="font-size: 1.2rem; color: #ff6b8b;">${settings.currencySymbol}${sale.total.toFixed(2)}</strong>
+                        </div>
+                    </div>
+                    
+                    <div style="font-size: 0.85rem; color: #666; margin-bottom: 10px;">
+                        ${products}
+                    </div>
+                    
+                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                        <span style="color: ${isOverdue ? '#dc3545' : '#856404'}; font-size: 0.9rem;">
+                            <i class="fas ${isOverdue ? 'fa-exclamation-triangle' : 'fa-calendar'}"></i>
+                            ${isOverdue ? 'VENCIDO: ' : 'Pago: '}${dueDateText}
+                        </span>
+                        <button onclick="vendorMarkAsPaid('${sale.docId}')" 
+                                style="background: #28a745; color: white; border: none; padding: 8px 16px; border-radius: 8px; cursor: pointer; font-weight: 600;">
+                            <i class="fas fa-check"></i> Cobrar
+                        </button>
+                    </div>
+                </div>
+            `;
+        });
+
+        listContainer.innerHTML = html;
+        if (totalElement) totalElement.textContent = `${settings.currencySymbol}${totalPending.toFixed(2)}`;
+
+    } catch (error) {
+        console.error('Error cargando ventas pendientes:', error);
+        listContainer.innerHTML = `
+            <div style="text-align: center; padding: 40px; color: #dc3545;">
+                <i class="fas fa-exclamation-triangle" style="font-size: 2rem;"></i>
+                <p>Error al cargar los pagos pendientes</p>
+            </div>
+        `;
+    }
+}
+
+/**
+ * Marca una venta como pagada desde la vista de vendedor
+ */
+async function vendorMarkAsPaid(docId) {
+    if (!confirm('¿Confirmas que esta venta ya fue pagada?')) return;
+
+    showLoading('Actualizando...');
+
+    try {
+        const db = firebase.firestore();
+        await db.collection('sales').doc(docId).update({
+            status: 'completed',
+            paidAt: new Date().toISOString(),
+            paymentLabel: 'A Crédito (Pagado)'
+        });
+
+        hideLoading();
+        showToast('✅ Pago registrado');
+
+        // Recargar lista y badge
+        loadVendorPendingSales();
+        loadVendorPendingCount();
+
+    } catch (error) {
+        console.error('Error actualizando venta:', error);
+        hideLoading();
+        alert('Error al registrar el pago. Intenta de nuevo.');
+    }
+}
+
 // Hacer funciones globales
 window.increaseQuantity = increaseQuantity;
 window.decreaseQuantity = decreaseQuantity;
+window.vendorMarkAsPaid = vendorMarkAsPaid;
+window.cancelSale = cancelSale;
 
 // Iniciar al cargar
 document.addEventListener('DOMContentLoaded', initializeVendorPOS);

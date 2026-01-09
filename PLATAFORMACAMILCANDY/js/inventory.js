@@ -86,12 +86,16 @@ async function loadProductsTable() {
     products.forEach(product => {
         const statusClass = product.stock <= product.minStock ? 'inventory-low' : 'inventory-ok';
         const statusText = product.stock <= product.minStock ? 'BAJO' : 'OK';
+
+        // Buscar la categoría de manera dinámica
+        const category = productCategories.find(c => c.id === product.type);
         const badgeClass = product.type === 'concentrado' ? 'badge-concentrado' : 'badge-embolsado';
-        const badgeText = product.type === 'concentrado' ? 'Concentrado' : 'Embolsado';
+        const badgeText = category ? category.name : product.type;
 
         const row = document.createElement('tr');
         row.innerHTML = `
             <td>${product.id}</td>
+            <td style="font-family: monospace; font-size: 0.8rem;">${product.barcode || '-'}</td>
             <td>${product.name}</td>
             <td><span class="badge ${badgeClass}">${badgeText}</span></td>
             <td>${settings.currencySymbol || '$'}${parseFloat(product.price).toFixed(2)}</td>
@@ -125,6 +129,7 @@ async function handleAddProduct() {
     const cost = parseFloat(document.getElementById('productCost').value);
     const stock = parseInt(document.getElementById('initialStock').value);
     const minStock = parseInt(document.getElementById('minStock').value);
+    let barcode = document.getElementById('productBarcode').value.trim();
 
     // Validaciones
     if (!name) {
@@ -152,6 +157,11 @@ async function handleAddProduct() {
         return;
     }
 
+    // Si no hay código de barras, generar uno
+    if (!barcode) {
+        barcode = await generateBarcodeForCategory(type);
+    }
+
     UI.showLoading('Guardando producto...');
 
     try {
@@ -161,7 +171,8 @@ async function handleAddProduct() {
             price,
             cost,
             stock,
-            minStock
+            minStock,
+            barcode  // Agregar código de barras
         });
 
         if (result.success) {
@@ -171,11 +182,12 @@ async function handleAddProduct() {
             document.getElementById('productCost').value = '';
             document.getElementById('initialStock').value = '';
             document.getElementById('minStock').value = '10';
+            document.getElementById('productBarcode').value = '';
 
             // Actualizar tabla
             await loadProductsTable();
 
-            UI.showNotification(`Producto "${name}" agregado exitosamente.`, 'success');
+            UI.showNotification(`Producto "${name}" agregado exitosamente. Código: ${barcode}`, 'success');
         } else {
             alert('Error al guardar el producto: ' + result.error);
         }
@@ -463,6 +475,236 @@ async function handleResetData() {
     }
 }
 
+// ==================== GENERACIÓN DE CÓDIGOS DE BARRAS ====================
+
+// Prefijo de empresa (provisional - el usuario lo puede cambiar después)
+const BARCODE_PREFIX = 'CAMI';
+
+/**
+ * Genera un código de barras provisional para el producto
+ * Formato: CAMI-[CAT]-[NNNN]
+ */
+async function generateBarcodeForCategory(categoryId) {
+    // Obtener abreviatura de categoría (máximo 3 caracteres)
+    const category = productCategories.find(c => c.id === categoryId);
+    let catAbbr = 'GEN'; // Por defecto "General"
+
+    if (category) {
+        // Tomar las primeras 3 consonantes o letras del nombre
+        catAbbr = category.name
+            .toUpperCase()
+            .normalize('NFD').replace(/[\u0300-\u036f]/g, '') // Quitar acentos
+            .replace(/[^A-Z]/g, '') // Solo letras
+            .substring(0, 3);
+    }
+
+    // Contar productos existentes con esta categoría para el número secuencial
+    const existingProducts = products.filter(p => p.type === categoryId);
+    const nextNumber = existingProducts.length + 1;
+    const paddedNumber = String(nextNumber).padStart(4, '0');
+
+    return `${BARCODE_PREFIX}-${catAbbr}-${paddedNumber}`;
+}
+
+/**
+ * Genera y muestra un código de barras en el campo del formulario
+ */
+async function generateBarcode() {
+    const categoryId = document.getElementById('productType').value;
+    const barcode = await generateBarcodeForCategory(categoryId);
+    document.getElementById('productBarcode').value = barcode;
+}
+
+/**
+ * Actualiza el código de barras cuando cambia la categoría
+ */
+function setupBarcodeAutoGenerate() {
+    const typeSelect = document.getElementById('productType');
+    if (typeSelect) {
+        typeSelect.addEventListener('change', () => {
+            // Solo generar si el campo está vacío o tiene un código provisional
+            const barcodeField = document.getElementById('productBarcode');
+            if (barcodeField && (!barcodeField.value || barcodeField.value.startsWith(BARCODE_PREFIX))) {
+                generateBarcode();
+            }
+        });
+    }
+}
+
+// Inicializar auto-generación cuando el DOM esté listo
+document.addEventListener('DOMContentLoaded', setupBarcodeAutoGenerate);
+
+// ==================== GESTIÓN DE CATEGORÍAS ====================
+
+// Categorías por defecto
+let productCategories = [
+    { id: 'concentrado', name: 'Concentrado de Michelada', isDefault: true },
+    { id: 'embolsado', name: 'Producto Embolsado', isDefault: true }
+];
+
+/**
+ * Carga las categorías desde Firebase
+ */
+async function loadCategories() {
+    try {
+        const db = firebase.firestore();
+        const doc = await db.collection('settings').doc('categories').get();
+
+        if (doc.exists && doc.data().list) {
+            productCategories = doc.data().list;
+        }
+
+        updateCategorySelect();
+    } catch (error) {
+        console.error('Error cargando categorías:', error);
+    }
+}
+
+/**
+ * Actualiza el select de tipos de producto con las categorías
+ */
+function updateCategorySelect() {
+    const select = document.getElementById('productType');
+    if (!select) return;
+
+    select.innerHTML = '';
+    productCategories.forEach(cat => {
+        const option = document.createElement('option');
+        option.value = cat.id;
+        option.textContent = cat.name;
+        select.appendChild(option);
+    });
+}
+
+/**
+ * Abre el modal de gestión de categorías
+ */
+function openCategoryModal() {
+    document.getElementById('categoryModal').classList.add('active');
+    renderCategoryList();
+}
+
+/**
+ * Cierra el modal de categorías
+ */
+function closeCategoryModal() {
+    document.getElementById('categoryModal').classList.remove('active');
+    document.getElementById('newCategoryName').value = '';
+}
+
+/**
+ * Renderiza la lista de categorías en el modal
+ */
+function renderCategoryList() {
+    const container = document.getElementById('categoryList');
+    if (!container) return;
+
+    if (productCategories.length === 0) {
+        container.innerHTML = '<p style="color: #666; text-align: center;">No hay categorías.</p>';
+        return;
+    }
+
+    container.innerHTML = productCategories.map(cat => `
+        <div style="display: flex; align-items: center; justify-content: space-between; padding: 12px; background: #f8f9fa; border-radius: 8px; margin-bottom: 8px;">
+            <span style="font-weight: 500;">
+                ${cat.name}
+                ${cat.isDefault ? '<small style="color: #888;">(Por defecto)</small>' : ''}
+            </span>
+            ${!cat.isDefault ? `
+                <button onclick="deleteCategory('${cat.id}')" class="btn btn-danger" style="padding: 5px 10px; font-size: 0.8rem;">
+                    <i class="fas fa-trash"></i>
+                </button>
+            ` : ''}
+        </div>
+    `).join('');
+}
+
+/**
+ * Agrega una nueva categoría
+ */
+async function addCategory() {
+    const nameInput = document.getElementById('newCategoryName');
+    const name = nameInput.value.trim();
+
+    if (!name) {
+        alert('Por favor ingresa un nombre para la categoría.');
+        return;
+    }
+
+    // Generar ID basado en el nombre
+    const id = name.toLowerCase()
+        .normalize('NFD').replace(/[\u0300-\u036f]/g, '') // Quitar acentos
+        .replace(/[^a-z0-9]/g, '_'); // Solo letras, números y guiones bajos
+
+    // Verificar si ya existe
+    if (productCategories.find(c => c.id === id)) {
+        alert('Ya existe una categoría con ese nombre.');
+        return;
+    }
+
+    productCategories.push({ id, name, isDefault: false });
+
+    // Guardar en Firebase
+    try {
+        const db = firebase.firestore();
+        await db.collection('settings').doc('categories').set({
+            list: productCategories
+        });
+
+        nameInput.value = '';
+        renderCategoryList();
+        updateCategorySelect();
+        UI.showNotification(`Categoría "${name}" agregada.`, 'success');
+    } catch (error) {
+        console.error('Error guardando categoría:', error);
+        alert('Error al guardar la categoría.');
+    }
+}
+
+/**
+ * Elimina una categoría
+ */
+async function deleteCategory(categoryId) {
+    const category = productCategories.find(c => c.id === categoryId);
+    if (!category) return;
+
+    if (category.isDefault) {
+        alert('No puedes eliminar las categorías por defecto.');
+        return;
+    }
+
+    // Verificar si hay productos con esta categoría
+    const productsWithCategory = products.filter(p => p.type === categoryId);
+    if (productsWithCategory.length > 0) {
+        alert(`No puedes eliminar esta categoría porque hay ${productsWithCategory.length} productos asociados a ella.`);
+        return;
+    }
+
+    if (!confirm(`¿Eliminar la categoría "${category.name}"?`)) return;
+
+    productCategories = productCategories.filter(c => c.id !== categoryId);
+
+    // Guardar en Firebase
+    try {
+        const db = firebase.firestore();
+        await db.collection('settings').doc('categories').set({
+            list: productCategories
+        });
+
+        renderCategoryList();
+        updateCategorySelect();
+        UI.showNotification('Categoría eliminada.', 'success');
+    } catch (error) {
+        console.error('Error eliminando categoría:', error);
+        alert('Error al eliminar la categoría.');
+    }
+}
+
+// Cargar categorías al inicializar
+(async function () {
+    await loadCategories();
+})();
+
 // Hacer funciones disponibles globalmente
 window.initializeInventory = initializeInventory;
 window.loadProductsTable = loadProductsTable;
@@ -472,3 +714,8 @@ window.adjustStockModalOpen = adjustStockModalOpen;
 window.adjustStock = adjustStock;
 window.getProducts = () => products;
 window.getSettings = () => settings;
+window.openCategoryModal = openCategoryModal;
+window.closeCategoryModal = closeCategoryModal;
+window.addCategory = addCategory;
+window.deleteCategory = deleteCategory;
+window.generateBarcode = generateBarcode;
