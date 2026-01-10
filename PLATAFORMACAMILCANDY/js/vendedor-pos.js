@@ -9,6 +9,10 @@ let products = [];
 let cart = [];
 let settings = {};
 let currentSale = null;
+let selectedRouteId = null;
+let selectedClientId = null;
+let vendorClients = [];
+let vendorRoutes = [];
 
 /**
  * Inicializa la aplicación del vendedor
@@ -43,6 +47,10 @@ async function initializeVendorPOS() {
         // Configurar eventos
         setupEventListeners();
         setupVendorTabs();
+        setupClientListeners();
+
+        // Cargar datos de rutas y clientes
+        await initializeRoutesAndClients();
 
         // Cargar conteo de pagos pendientes
         loadVendorPendingCount();
@@ -856,10 +864,16 @@ function setupVendorTabs() {
             // Mostrar/ocultar vistas
             document.getElementById('posView').style.display = view === 'pos' ? 'grid' : 'none';
             document.getElementById('pendingView').style.display = view === 'pending' ? 'block' : 'none';
+            const clientsView = document.getElementById('clientsView');
+            if (clientsView) {
+                clientsView.style.display = view === 'clients' ? 'block' : 'none';
+            }
 
-            // Cargar datos si es la vista de pendientes
+            // Cargar datos según la vista
             if (view === 'pending') {
                 loadVendorPendingSales();
+            } else if (view === 'clients') {
+                loadVendorClients();
             }
         });
     });
@@ -1038,6 +1052,537 @@ window.increaseQuantity = increaseQuantity;
 window.decreaseQuantity = decreaseQuantity;
 window.vendorMarkAsPaid = vendorMarkAsPaid;
 window.cancelSale = cancelSale;
+window.openClientModal = openClientModal;
+window.editClient = editClient;
+window.deleteClient = deleteClient;
+window.callClient = callClient;
 
 // Iniciar al cargar
 document.addEventListener('DOMContentLoaded', initializeVendorPOS);
+
+// ==================== RUTAS Y CLIENTES ====================
+
+/**
+ * Inicializa las rutas y clientes
+ */
+async function initializeRoutesAndClients() {
+    try {
+        // Inicializar variable global db para los servicios
+        window.db = firebase.firestore();
+        db = window.db;
+
+        // Cargar rutas
+        await loadVendorRoutes();
+
+        // Cargar clientes
+        await loadVendorClients();
+
+        // Popular selectores de ruta
+        populateRouteSelects();
+
+        console.log('✅ Rutas y clientes inicializados');
+    } catch (error) {
+        console.error('❌ Error inicializando rutas y clientes:', error);
+    }
+}
+
+/**
+ * Carga las rutas desde Firebase
+ */
+async function loadVendorRoutes() {
+    try {
+        const snapshot = await db.collection('routes').get();
+
+        if (snapshot.empty) {
+            // Crear rutas por defecto
+            const defaultRoutes = [
+                { id: 'comitan', name: 'Comitán' },
+                { id: 'palenque', name: 'Palenque' },
+                { id: 'tenozique', name: 'Tenozique' },
+                { id: 'salto_de_agua', name: 'Salto de Agua' },
+                { id: 'trinitaria', name: 'Trinitaria' },
+                { id: 'comalapa', name: 'Comalapa' },
+                { id: 'chicomuselo', name: 'Chicomuselo' },
+                { id: 'tzimol', name: 'Tzimol' },
+                { id: 'margaritas', name: 'Margaritas' }
+            ];
+
+            for (const route of defaultRoutes) {
+                await db.collection('routes').doc(route.id).set({
+                    ...route,
+                    isActive: true,
+                    createdAt: firebase.firestore.FieldValue.serverTimestamp()
+                });
+            }
+            vendorRoutes = defaultRoutes;
+        } else {
+            vendorRoutes = snapshot.docs.map(doc => ({
+                id: doc.id,
+                ...doc.data()
+            }));
+        }
+
+        console.log(`📍 ${vendorRoutes.length} rutas cargadas`);
+    } catch (error) {
+        console.error('Error cargando rutas:', error);
+        vendorRoutes = [];
+    }
+}
+
+/**
+ * Carga los clientes desde Firebase
+ */
+async function loadVendorClients() {
+    try {
+        const snapshot = await db.collection('clients').orderBy('businessName').get();
+
+        vendorClients = snapshot.docs.map(doc => ({
+            id: doc.id,
+            ...doc.data()
+        }));
+
+        console.log(`👥 ${vendorClients.length} clientes cargados`);
+
+        // Renderizar lista si estamos en la vista de clientes
+        renderVendorClientsList();
+
+    } catch (error) {
+        console.error('Error cargando clientes:', error);
+        vendorClients = [];
+    }
+}
+
+/**
+ * Popula los selectores de rutas
+ */
+function populateRouteSelects() {
+    const selects = [
+        'saleRoute',
+        'clientRoute',
+        'clientRouteFilter'
+    ];
+
+    selects.forEach(selectId => {
+        const select = document.getElementById(selectId);
+        if (!select) return;
+
+        // Mantener la primera opción
+        const firstOption = select.options[0];
+        select.innerHTML = '';
+        select.appendChild(firstOption);
+
+        // Agregar rutas
+        vendorRoutes.filter(r => r.isActive !== false).forEach(route => {
+            const option = document.createElement('option');
+            option.value = route.id;
+            option.textContent = route.name;
+            select.appendChild(option);
+        });
+    });
+}
+
+/**
+ * Renderiza la lista de clientes en la vista del vendedor
+ */
+function renderVendorClientsList() {
+    const container = document.getElementById('vendorClientsList');
+    if (!container) return;
+
+    const routeFilter = document.getElementById('clientRouteFilter')?.value || '';
+    const searchQuery = document.getElementById('clientSearchInput')?.value?.toLowerCase() || '';
+
+    let filteredClients = vendorClients;
+
+    // Filtrar por ruta
+    if (routeFilter) {
+        filteredClients = filteredClients.filter(c => c.routeId === routeFilter);
+    }
+
+    // Filtrar por búsqueda
+    if (searchQuery) {
+        filteredClients = filteredClients.filter(c =>
+            c.businessName?.toLowerCase().includes(searchQuery) ||
+            c.ownerName?.toLowerCase().includes(searchQuery) ||
+            c.phone?.includes(searchQuery)
+        );
+    }
+
+    if (filteredClients.length === 0) {
+        container.innerHTML = `
+            <div style="text-align: center; padding: 40px; color: #666;">
+                <i class="fas fa-users" style="font-size: 3rem; color: #ddd;"></i>
+                <p style="margin-top: 15px;">No hay clientes${routeFilter ? ' en esta ruta' : ''}</p>
+                <button class="btn btn-primary" onclick="openClientModal()" style="margin-top: 15px;">
+                    <i class="fas fa-plus"></i> Agregar Cliente
+                </button>
+            </div>
+        `;
+        return;
+    }
+
+    let html = '';
+    filteredClients.forEach(client => {
+        const route = vendorRoutes.find(r => r.id === client.routeId);
+        const routeName = route ? route.name : 'Sin ruta';
+        const creditBadge = client.hasCredit && client.creditAmount > 0
+            ? `<span style="background: #dc3545; color: white; padding: 2px 6px; border-radius: 4px; font-size: 0.75rem;">💳 $${client.creditAmount.toFixed(2)}</span>`
+            : '';
+
+        html += `
+            <div style="background: #f8f9fa; border-radius: 12px; padding: 15px; margin-bottom: 12px; border-left: 4px solid #ff6b8b;">
+                <div style="display: flex; justify-content: space-between; align-items: start;">
+                    <div style="flex: 1;">
+                        <h4 style="margin: 0 0 5px 0; color: #333;">
+                            <i class="fas fa-store" style="color: #ff6b8b;"></i> ${client.businessName}
+                        </h4>
+                        <p style="margin: 3px 0; font-size: 0.9rem; color: #666;">
+                            <i class="fas fa-user"></i> ${client.ownerName || 'Sin nombre'}
+                        </p>
+                        <p style="margin: 3px 0; font-size: 0.9rem; color: #666;">
+                            <i class="fas fa-phone"></i> ${client.phone || 'Sin teléfono'}
+                        </p>
+                        <p style="margin: 3px 0; font-size: 0.9rem; color: #666;">
+                            <i class="fas fa-route"></i> ${routeName}
+                        </p>
+                        ${client.address ? `<p style="margin: 3px 0; font-size: 0.85rem; color: #888;"><i class="fas fa-map-marker-alt"></i> ${client.address}</p>` : ''}
+                        ${client.reference ? `<p style="margin: 3px 0; font-size: 0.85rem; color: #888;"><i class="fas fa-info-circle"></i> ${client.reference}</p>` : ''}
+                        ${creditBadge}
+                    </div>
+                    <div style="display: flex; flex-direction: column; gap: 5px;">
+                        ${client.phone ? `<button onclick="callClient('${client.phone}')" class="btn btn-success" style="padding: 8px 12px; font-size: 0.85rem;"><i class="fas fa-phone"></i></button>` : ''}
+                        <button onclick="editClient('${client.id}')" class="btn btn-info" style="padding: 8px 12px; font-size: 0.85rem;"><i class="fas fa-edit"></i></button>
+                    </div>
+                </div>
+            </div>
+        `;
+    });
+
+    container.innerHTML = html;
+}
+
+/**
+ * Configura los event listeners para clientes
+ */
+function setupClientListeners() {
+    // Botón nuevo cliente
+    const addBtn = document.getElementById('addNewClientBtn');
+    if (addBtn) {
+        addBtn.addEventListener('click', () => openClientModal());
+    }
+
+    // Cerrar modal
+    const closeBtn = document.getElementById('closeClientModal');
+    if (closeBtn) {
+        closeBtn.addEventListener('click', closeClientModal);
+    }
+
+    // Cancelar
+    const cancelBtn = document.getElementById('cancelClientBtn');
+    if (cancelBtn) {
+        cancelBtn.addEventListener('click', closeClientModal);
+    }
+
+    // Guardar cliente
+    const saveBtn = document.getElementById('saveClientBtn');
+    if (saveBtn) {
+        saveBtn.addEventListener('click', saveClient);
+    }
+
+    // Filtro por ruta
+    const routeFilter = document.getElementById('clientRouteFilter');
+    if (routeFilter) {
+        routeFilter.addEventListener('change', renderVendorClientsList);
+    }
+
+    // Búsqueda
+    const searchInput = document.getElementById('clientSearchInput');
+    if (searchInput) {
+        searchInput.addEventListener('input', () => {
+            clearTimeout(searchInput.searchTimeout);
+            searchInput.searchTimeout = setTimeout(renderVendorClientsList, 300);
+        });
+    }
+
+    // Selección de ruta en modal de pago
+    const saleRouteSelect = document.getElementById('saleRoute');
+    if (saleRouteSelect) {
+        saleRouteSelect.addEventListener('change', (e) => {
+            selectedRouteId = e.target.value;
+            updateClientSelect();
+        });
+    }
+
+    // Selección de cliente en modal de pago
+    const saleClientSelect = document.getElementById('saleClient');
+    if (saleClientSelect) {
+        saleClientSelect.addEventListener('change', (e) => {
+            const value = e.target.value;
+            if (value === 'new') {
+                // Abrir modal de nuevo cliente
+                openClientModal(true);
+            } else if (value) {
+                selectedClientId = value;
+                showSelectedClientInfo(value);
+            } else {
+                selectedClientId = null;
+                hideSelectedClientInfo();
+            }
+        });
+    }
+}
+
+/**
+ * Actualiza el selector de clientes según la ruta seleccionada
+ */
+function updateClientSelect() {
+    const select = document.getElementById('saleClient');
+    if (!select) return;
+
+    select.innerHTML = '<option value="">-- Seleccionar Cliente --</option>';
+    select.innerHTML += '<option value="new">➕ Nuevo Cliente...</option>';
+
+    let filteredClients = vendorClients;
+    if (selectedRouteId) {
+        filteredClients = vendorClients.filter(c => c.routeId === selectedRouteId);
+    }
+
+    filteredClients.forEach(client => {
+        const creditBadge = client.hasCredit ? ' 💳' : '';
+        const option = document.createElement('option');
+        option.value = client.id;
+        option.textContent = `${client.businessName}${creditBadge}`;
+        select.appendChild(option);
+    });
+}
+
+/**
+ * Muestra información del cliente seleccionado
+ */
+function showSelectedClientInfo(clientId) {
+    const container = document.getElementById('selectedClientInfo');
+    const manualGroup = document.getElementById('manualNameGroup');
+    if (!container) return;
+
+    const client = vendorClients.find(c => c.id === clientId);
+    if (!client) {
+        hideSelectedClientInfo();
+        return;
+    }
+
+    container.style.display = 'block';
+    container.innerHTML = `
+        <div style="font-size: 0.9rem;">
+            <strong><i class="fas fa-store"></i> ${client.businessName}</strong>
+            <br>
+            <small><i class="fas fa-user"></i> ${client.ownerName || 'Sin nombre'}</small>
+            ${client.phone ? `<br><small><i class="fas fa-phone"></i> ${client.phone}</small>` : ''}
+            ${client.hasCredit ? `<br><span style="color: #dc3545;"><i class="fas fa-exclamation-triangle"></i> Crédito pendiente: $${client.creditAmount?.toFixed(2) || '0.00'}</span>` : ''}
+        </div>
+    `;
+
+    // Ocultar campo de nombre manual
+    if (manualGroup) {
+        manualGroup.style.display = 'none';
+    }
+
+    // Llenar el campo de nombre con el nombre del cliente
+    const customerNameInput = document.getElementById('customerName');
+    if (customerNameInput) {
+        customerNameInput.value = client.businessName;
+    }
+}
+
+/**
+ * Oculta la información del cliente seleccionado
+ */
+function hideSelectedClientInfo() {
+    const container = document.getElementById('selectedClientInfo');
+    const manualGroup = document.getElementById('manualNameGroup');
+
+    if (container) {
+        container.style.display = 'none';
+    }
+    if (manualGroup) {
+        manualGroup.style.display = 'block';
+    }
+}
+
+/**
+ * Abre el modal de cliente
+ */
+function openClientModal(fromPayment = false) {
+    const modal = document.getElementById('clientModal');
+    if (!modal) return;
+
+    // Limpiar formulario
+    document.getElementById('editClientId').value = '';
+    document.getElementById('clientBusinessName').value = '';
+    document.getElementById('clientOwnerName').value = '';
+    document.getElementById('clientPhone').value = '';
+    document.getElementById('clientRoute').value = selectedRouteId || '';
+    document.getElementById('clientAddress').value = '';
+    document.getElementById('clientReference').value = '';
+    document.getElementById('clientNotes').value = '';
+
+    document.getElementById('clientModalTitle').textContent = 'Nuevo Cliente';
+
+    // Popular rutas en el select del modal
+    populateRouteSelects();
+
+    modal.style.display = 'flex';
+    modal.classList.add('active');
+}
+
+/**
+ * Cierra el modal de cliente
+ */
+function closeClientModal() {
+    const modal = document.getElementById('clientModal');
+    if (modal) {
+        modal.style.display = 'none';
+        modal.classList.remove('active');
+    }
+}
+
+/**
+ * Edita un cliente existente
+ */
+function editClient(clientId) {
+    const client = vendorClients.find(c => c.id === clientId);
+    if (!client) return;
+
+    const modal = document.getElementById('clientModal');
+    if (!modal) return;
+
+    document.getElementById('editClientId').value = clientId;
+    document.getElementById('clientBusinessName').value = client.businessName || '';
+    document.getElementById('clientOwnerName').value = client.ownerName || '';
+    document.getElementById('clientPhone').value = client.phone || '';
+    document.getElementById('clientRoute').value = client.routeId || '';
+    document.getElementById('clientAddress').value = client.address || '';
+    document.getElementById('clientReference').value = client.reference || '';
+    document.getElementById('clientNotes').value = client.notes || '';
+
+    document.getElementById('clientModalTitle').textContent = 'Editar Cliente';
+
+    modal.style.display = 'flex';
+    modal.classList.add('active');
+}
+
+/**
+ * Guarda un cliente (nuevo o editado)
+ */
+async function saveClient() {
+    const editId = document.getElementById('editClientId').value;
+    const businessName = document.getElementById('clientBusinessName').value.trim();
+    const ownerName = document.getElementById('clientOwnerName').value.trim();
+    const phone = document.getElementById('clientPhone').value.trim();
+    const routeId = document.getElementById('clientRoute').value;
+    const address = document.getElementById('clientAddress').value.trim();
+    const reference = document.getElementById('clientReference').value.trim();
+    const notes = document.getElementById('clientNotes').value.trim();
+
+    if (!businessName) {
+        showToast('El nombre del local es obligatorio');
+        return;
+    }
+
+    if (!routeId) {
+        showToast('Selecciona una ruta');
+        return;
+    }
+
+    showLoading('Guardando cliente...');
+
+    try {
+        const clientData = {
+            businessName,
+            ownerName,
+            phone,
+            routeId,
+            address,
+            reference,
+            notes,
+            updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+        };
+
+        if (editId) {
+            // Actualizar existente
+            await db.collection('clients').doc(editId).update(clientData);
+
+            const index = vendorClients.findIndex(c => c.id === editId);
+            if (index !== -1) {
+                vendorClients[index] = { ...vendorClients[index], ...clientData };
+            }
+
+            showToast('✅ Cliente actualizado');
+        } else {
+            // Crear nuevo
+            clientData.createdAt = firebase.firestore.FieldValue.serverTimestamp();
+            clientData.createdBy = 'vendedor';
+            clientData.totalPurchases = 0;
+            clientData.purchaseCount = 0;
+            clientData.hasCredit = false;
+            clientData.creditAmount = 0;
+
+            const docRef = await db.collection('clients').add(clientData);
+            vendorClients.push({ id: docRef.id, ...clientData });
+
+            // Si venía del modal de pago, seleccionar el nuevo cliente
+            selectedClientId = docRef.id;
+            updateClientSelect();
+
+            const saleClientSelect = document.getElementById('saleClient');
+            if (saleClientSelect) {
+                saleClientSelect.value = docRef.id;
+                showSelectedClientInfo(docRef.id);
+            }
+
+            showToast('✅ Cliente creado');
+        }
+
+        hideLoading();
+        closeClientModal();
+        renderVendorClientsList();
+
+    } catch (error) {
+        console.error('Error guardando cliente:', error);
+        hideLoading();
+        showToast('❌ Error al guardar cliente');
+    }
+}
+
+/**
+ * Elimina un cliente
+ */
+async function deleteClient(clientId) {
+    if (!confirm('¿Estás seguro de eliminar este cliente?')) return;
+
+    showLoading('Eliminando...');
+
+    try {
+        await db.collection('clients').doc(clientId).delete();
+
+        const index = vendorClients.findIndex(c => c.id === clientId);
+        if (index !== -1) {
+            vendorClients.splice(index, 1);
+        }
+
+        hideLoading();
+        showToast('🗑️ Cliente eliminado');
+        renderVendorClientsList();
+
+    } catch (error) {
+        console.error('Error eliminando cliente:', error);
+        hideLoading();
+        showToast('❌ Error al eliminar cliente');
+    }
+}
+
+/**
+ * Llama a un cliente
+ */
+function callClient(phone) {
+    if (!phone) return;
+    window.location.href = `tel:${phone}`;
+}

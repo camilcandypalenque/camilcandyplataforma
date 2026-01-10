@@ -58,6 +58,52 @@ function setupInventoryEventListeners() {
     if (resetDataBtn) {
         resetDataBtn.addEventListener('click', handleResetData);
     }
+
+    // Evento para tipo de costo
+    const costTypeSelect = document.getElementById('costType');
+    if (costTypeSelect) {
+        costTypeSelect.addEventListener('change', () => {
+            const batchGroup = document.getElementById('batchSizeGroup');
+            if (batchGroup) {
+                batchGroup.style.display = costTypeSelect.value === 'batch' ? 'block' : 'none';
+            }
+        });
+    }
+
+    // Evento para preview de caducidad
+    const expirationInput = document.getElementById('expirationDate');
+    if (expirationInput) {
+        expirationInput.addEventListener('change', updateExpirationPreview);
+    }
+}
+
+/**
+ * Actualiza la vista previa de caducidad
+ */
+function updateExpirationPreview() {
+    const dateInput = document.getElementById('expirationDate');
+    const preview = document.getElementById('expirationPreview');
+    if (!dateInput || !preview) return;
+
+    if (!dateInput.value) {
+        preview.innerHTML = '<small style="color: #888;"><i class="fas fa-info-circle"></i> Sin fecha de caducidad</small>';
+        return;
+    }
+
+    const expDate = new Date(dateInput.value + 'T00:00:00');
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    const diffTime = expDate - today;
+    const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+
+    if (diffDays < 0) {
+        preview.innerHTML = `<span style="color: #dc3545;"><i class="fas fa-skull-crossbones"></i> <strong>CADUCADO</strong> hace ${Math.abs(diffDays)} días</span>`;
+    } else if (diffDays <= 15) {
+        preview.innerHTML = `<span style="color: #ffc107;"><i class="fas fa-exclamation-triangle"></i> <strong>Caduca pronto:</strong> ${diffDays} días</span>`;
+    } else {
+        preview.innerHTML = `<span style="color: #28a745;"><i class="fas fa-check-circle"></i> Vigente por ${diffDays} días</span>`;
+    }
 }
 
 /**
@@ -92,14 +138,29 @@ async function loadProductsTable() {
         const badgeClass = product.type === 'concentrado' ? 'badge-concentrado' : 'badge-embolsado';
         const badgeText = category ? category.name : product.type;
 
+        // Calcular badge de caducidad
+        let expirationBadge = '';
+        if (product.expirationDate) {
+            const expDate = product.expirationDate.toDate ? product.expirationDate.toDate() : new Date(product.expirationDate);
+            const today = new Date();
+            today.setHours(0, 0, 0, 0);
+            const diffDays = Math.ceil((expDate - today) / (1000 * 60 * 60 * 24));
+
+            if (diffDays < 0) {
+                expirationBadge = `<br><span style="background: #dc3545; color: white; padding: 2px 6px; border-radius: 4px; font-size: 0.7rem;">☠️ CADUCADO</span>`;
+            } else if (diffDays <= 15) {
+                expirationBadge = `<br><span style="background: #ffc107; color: #333; padding: 2px 6px; border-radius: 4px; font-size: 0.7rem;">⚠️ ${diffDays} días</span>`;
+            }
+        }
+
         const row = document.createElement('tr');
         row.innerHTML = `
             <td>${product.id}</td>
             <td style="font-family: monospace; font-size: 0.8rem;">${product.barcode || '-'}</td>
-            <td>${product.name}</td>
+            <td>${product.name}${expirationBadge}</td>
             <td><span class="badge ${badgeClass}">${badgeText}</span></td>
             <td>${settings.currencySymbol || '$'}${parseFloat(product.price).toFixed(2)}</td>
-            <td>${settings.currencySymbol || '$'}${parseFloat(product.cost).toFixed(2)}</td>
+            <td>${product.cost ? (settings.currencySymbol || '$') + parseFloat(product.cost).toFixed(2) : '-'}</td>
             <td class="${statusClass}">${product.stock}</td>
             <td><span class="${statusClass}">${statusText}</span></td>
             <td>
@@ -126,9 +187,13 @@ async function handleAddProduct() {
     const name = document.getElementById('productName').value.trim();
     const type = document.getElementById('productType').value;
     const price = parseFloat(document.getElementById('productPrice').value);
-    const cost = parseFloat(document.getElementById('productCost').value);
+    const costInput = document.getElementById('productCost').value;
+    const cost = costInput ? parseFloat(costInput) : null; // Costo ahora es opcional
+    const costType = document.getElementById('costType')?.value || 'unit';
+    const batchSize = costType === 'batch' ? parseInt(document.getElementById('batchSize')?.value) : null;
     const stock = parseInt(document.getElementById('initialStock').value);
     const minStock = parseInt(document.getElementById('minStock').value);
+    const expirationDate = document.getElementById('expirationDate')?.value || null;
     let barcode = document.getElementById('productBarcode').value.trim();
 
     // Validaciones
@@ -142,7 +207,8 @@ async function handleAddProduct() {
         return;
     }
 
-    if (isNaN(cost) || cost < 0) {
+    // Costo es opcional, pero si se ingresa debe ser válido
+    if (cost !== null && (isNaN(cost) || cost < 0)) {
         alert('Por favor ingresa un costo válido.');
         return;
     }
@@ -165,15 +231,20 @@ async function handleAddProduct() {
     UI.showLoading('Guardando producto...');
 
     try {
-        const result = await FirebaseService.addProduct({
+        const productData = {
             name,
             type,
             price,
-            cost,
+            cost: cost || 0,
+            costType,
+            batchSize,
             stock,
             minStock,
-            barcode  // Agregar código de barras
-        });
+            barcode,
+            expirationDate: expirationDate ? new Date(expirationDate) : null
+        };
+
+        const result = await FirebaseService.addProduct(productData);
 
         if (result.success) {
             // Limpiar formulario
@@ -183,6 +254,11 @@ async function handleAddProduct() {
             document.getElementById('initialStock').value = '';
             document.getElementById('minStock').value = '10';
             document.getElementById('productBarcode').value = '';
+            if (document.getElementById('costType')) document.getElementById('costType').value = 'unit';
+            if (document.getElementById('batchSize')) document.getElementById('batchSize').value = '';
+            if (document.getElementById('batchSizeGroup')) document.getElementById('batchSizeGroup').style.display = 'none';
+            if (document.getElementById('expirationDate')) document.getElementById('expirationDate').value = '';
+            if (document.getElementById('expirationPreview')) document.getElementById('expirationPreview').innerHTML = '';
 
             // Actualizar tabla
             await loadProductsTable();
